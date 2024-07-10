@@ -16,7 +16,9 @@ def load_imagenet_dataset(num_samples=100, split="validation"):
     list: A list of tuples, each containing (image, label, class_name).
     """
     # Load the ImageNet dataset
-    dataset = load_dataset("imagenet-1k", split=split, trust_remote_code=True)
+    dataset = load_dataset(
+        "imagenet-1k", split=split, trust_remote_code=True, streaming=True
+    )
 
     # Load the class labels
     labels = dataset.features["label"].names
@@ -30,7 +32,8 @@ def load_imagenet_dataset(num_samples=100, split="validation"):
     )
 
     # Randomly sample 'num_samples' from the dataset
-    sampled_data = random.sample(range(len(dataset)), num_samples)
+    # sampled_data = random.sample(range(len(dataset)), num_samples)
+    sampled_data = random.sample(1000, num_samples)
 
     annotated_images = []
     for idx in sampled_data:

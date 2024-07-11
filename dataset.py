@@ -1,59 +1,100 @@
-from datasets import load_dataset
-from torchvision import transforms
-from PIL import Image
+import os
 import random
 
+import cv2
+import numpy as np
+from datasets import load_dataset
+from PIL import Image
 
-def load_imagenet_dataset(num_samples=100, split="validation"):
+
+def load_imagenet_subset(num_samples=100, split="train"):
     """
-    Load a subset of the ImageNet dataset from Hugging Face.
+    Load a subset of the ImageNet-1k-minimal dataset from Hugging Face,
+    keeping the original image resolution.
 
     Args:
     num_samples (int): Number of samples to load. Default is 100.
-    split (str): Dataset split to use. Default is "validation".
+    split (str): Dataset split to use. Default is "train".
 
     Returns:
     list: A list of tuples, each containing (image, label, class_name).
     """
-    # Load the ImageNet dataset
-    dataset = load_dataset(
-        "imagenet-1k", split=split, trust_remote_code=True, streaming=True
-    )
-
-    # Load the class labels
+    dataset = load_dataset("Maysee/tiny-imagenet", split=split)
     labels = dataset.features["label"].names
 
-    # Define a transform for the images
-    transform = transforms.Compose(
-        [
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-        ]
-    )
-
-    # Randomly sample 'num_samples' from the dataset
-    # sampled_data = random.sample(range(len(dataset)), num_samples)
-    sampled_data = random.sample(1000, num_samples)
+    sampled_data = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
 
     annotated_images = []
     for idx in sampled_data:
-        # Get the image and its label
         sample = dataset[idx]
         image = sample["image"]
         label = sample["label"]
-
-        # Get the class name
         class_name = labels[label]
-
-        # Apply the transform to the image
-        image_tensor = transform(image)
-
-        annotated_images.append((image_tensor, label, class_name))
+        annotated_images.append((image, label, class_name))
 
     return annotated_images
 
 
+def save_images_with_overlay(dataset, output_dir):
+    """
+    Save images from the dataset with class name overlays,
+    maintaining the original image resolution.
+
+    Args:
+    dataset (list): List of tuples (image, label, class_name).
+    output_dir (str): Directory to save the images.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    for idx, (image, label, class_name) in enumerate(dataset):
+        # Convert PIL Image to numpy array
+        image_np = np.array(image)
+
+        # Get image dimensions
+        height, width = image_np.shape[:2]
+
+        # Calculate font scale based on image size
+        font_scale = min(width, height) / 500.0
+        thickness = max(1, int(font_scale * 2))
+
+        # Add class name overlay
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text_size = cv2.getTextSize(class_name, font, font_scale, thickness)[0]
+        text_x = 10
+        text_y = text_size[1] + 10
+
+        cv2.putText(
+            image_np,
+            class_name,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness + 1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image_np,
+            class_name,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            cv2.LINE_AA,
+        )
+
+        # Save the image
+        output_path = os.path.join(output_dir, f"image_{idx:03d}_{class_name}.png")
+        cv2.imwrite(output_path, cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
+
+    print(f"Saved {len(dataset)} images to {output_dir}")
+
+
+# Example usage
 if __name__ == "__main__":
-    dataset = load_imagenet_dataset(num_samples=10)
-    for image, label, class_name in dataset:
-        print(f"Image shape: {image.shape}, Label: {label}, Class: {class_name}")
+    # Load the dataset
+    dataset = load_imagenet_subset(num_samples=10)
+
+    # Save images with overlays
+    save_images_with_overlay(dataset, "output_images")

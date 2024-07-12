@@ -9,7 +9,7 @@ from PIL import Image
 
 def load_imagenet_subset(num_samples=100, split="train"):
     """
-    Load a subset of the ImageNet-1k-minimal dataset from Hugging Face,
+    Load a subset of the ImageNet-1k dataset from Hugging Face,
     keeping the original image resolution.
 
     Args:
@@ -19,14 +19,11 @@ def load_imagenet_subset(num_samples=100, split="train"):
     Returns:
     list: A list of tuples, each containing (image, label, class_name).
     """
-    dataset = load_dataset("Maysee/tiny-imagenet", split=split)
+    dataset = load_dataset("imagenet-1k", split=split, use_auth_token=True)
     labels = dataset.features["label"].names
 
-    sampled_data = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
-
     annotated_images = []
-    for idx in sampled_data:
-        sample = dataset[idx]
+    for sample in dataset.take(num_samples):
         image = sample["image"]
         label = sample["label"]
         class_name = labels[label]

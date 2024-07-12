@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import math
 
 
 @dataclass
@@ -43,54 +44,6 @@ class MLP(nn.Module):
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
-
-class DiTBlock(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
-
-    def __init__(self, config: DiTConfig):
-        super().__init__()
-        self.n_embd = config.n_embd
-        self.n_head = config.n_head
-
-        # Layer norms
-        self.norm1 = nn.LayerNorm(config.n_embd, elementwise_affine=False, eps=1e-6)
-        self.norm2 = nn.LayerNorm(config.n_embd, elementwise_affine=False, eps=1e-6)
-
-        # Self-attention
-        self.attn = SelfAttention(config)
-
-        # MLP
-        self.mlp = MLP(config)
-
-        # AdaLN-Zero modulation
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(config.n_embd, 6 * config.n_embd, bias=True)
-        )
-
-    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        (
-            shift_msa,
-            scale_msa,
-            gate_msa,
-            shift_mlp,
-            scale_mlp,
-            gate_mlp,
-        ) = self.adaLN_modulation(c).chunk(6, dim=1)
-
-        # Self-attention
-        x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa)
-        )
-
-        # MLP
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(
-            modulate(self.norm2(x), shift_mlp, scale_mlp)
-        )
-
-        return x
 
 
 class SelfAttention(nn.Module):
@@ -136,6 +89,80 @@ class SelfAttention(nn.Module):
         # y shape after projection: (B, T, C)
 
         return y
+
+class SinusoidalPositionEmbeddings(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, time):
+        device = time.device
+        half_dim = self.dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+
+        # Handle odd dimensions
+        if self.dim % 2 == 1:
+            embeddings = torch.cat(
+                [embeddings, torch.zeros_like(embeddings[:, :1])], dim=-1
+            )
+
+        return embeddings
+    
+class DiTBlock(nn.Module):
+    """
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+
+    def __init__(self, config: DiTConfig):
+        super().__init__()
+        self.n_embd = config.n_embd
+        self.n_head = config.n_head
+
+        # Layer norms
+        self.norm1 = nn.LayerNorm(config.n_embd, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(config.n_embd, elementwise_affine=False, eps=1e-6)
+
+        # Self-attention
+        self.attn = SelfAttention(config)
+
+        # MLP
+        self.mlp = MLP(config)
+
+        # AdaLN-Zero modulation
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(config.n_embd, 6 * config.n_embd, bias=True)
+        )
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        modulation = self.adaLN_modulation(c)  # Shape: [B, 6*C]
+        
+        # Reshape modulation parameters
+        modulation = modulation.view(B, 6, C)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation.unbind(dim=1)
+        
+        # Reshape modulation parameters to match x's dimensions
+        shift_msa = shift_msa.view(B, 1, C)
+        scale_msa = scale_msa.view(B, 1, C)
+        gate_msa = gate_msa.view(B, 1, C)
+        shift_mlp = shift_mlp.view(B, 1, C)
+        scale_mlp = scale_mlp.view(B, 1, C)
+        gate_mlp = gate_mlp.view(B, 1, C)
+
+        # Self-attention
+        x = x + gate_msa * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa)
+        )
+
+        # MLP
+        x = x + gate_mlp * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+
+        return x
 
 
 class Patchify(nn.Module):
@@ -199,11 +226,11 @@ class FirstLayer(nn.Module):
 
         # Timestep embedding
         self.t_embedder = nn.Sequential(
-            nn.Linear(1, config.n_embd),
-            nn.SiLU(),
+            SinusoidalPositionEmbeddings(config.n_embd),
             nn.Linear(config.n_embd, config.n_embd),
+            nn.GELU(approximate="tanh"),
         )
-
+        
         # Class embedding
         self.y_embedder = nn.Embedding(config.num_classes, config.n_embd)
 

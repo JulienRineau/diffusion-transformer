@@ -2,12 +2,15 @@ import os
 import random
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from datasets import load_dataset
 from diffusers import AutoencoderKL
 from PIL import Image
 from torchvision import transforms
+
+from dataset import load_imagenet_subset
 
 
 class StableDiffusionVAE:
@@ -25,11 +28,11 @@ class StableDiffusionVAE:
 
     def preprocess(self, image):
         if isinstance(image, Image.Image):
-            image = self.transform(image).unsqueeze(0)
+            image = self.transform(image)
         return image.to(self.device).float()  # Ensure float32
 
     def encode(self, image):
-        image = self.preprocess(image)
+        # Remove the unsqueeze operation as the input is already batched
         with torch.no_grad():
             latent = self.vae.encode(image).latent_dist.sample()
             latent = latent * self.vae.config.scaling_factor
@@ -40,26 +43,6 @@ class StableDiffusionVAE:
         with torch.no_grad():
             image = self.vae.decode(latent).sample
         return image
-
-
-def load_imagenet_subset(num_samples=100, split="train"):
-    dataset = load_dataset("Maysee/tiny-imagenet", split=split)
-    labels = dataset.features["label"].names
-    sampled_data = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
-    annotated_images = []
-    for idx in sampled_data:
-        sample = dataset[idx]
-        image = sample["image"]
-        label = sample["label"]
-        class_name = labels[label]
-        annotated_images.append((image, label, class_name))
-    return annotated_images
-
-
-import matplotlib.pyplot as plt
-import numpy as np
-from PIL import Image
-import torch
 
 
 def process_and_save_image(vae, input_image, output_path, class_name):

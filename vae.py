@@ -7,32 +7,19 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from diffusers import AutoencoderKL
-from PIL import Image
-from torchvision import transforms
 
-from dataset import load_imagenet_subset
+from dataset import PreprocessedDataset, load_imagenet_subset
 
 
 class StableDiffusionVAE:
     def __init__(self, model_path="stabilityai/sd-vae-ft-mse"):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         self.vae = AutoencoderKL.from_pretrained(model_path).to(self.device)
         self.vae.eval()
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((256, 256)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-
-    def preprocess(self, image):
-        if isinstance(image, Image.Image):
-            image = self.transform(image)
-        return image.to(self.device).float()  # Ensure float32
 
     def encode(self, image):
-        # Remove the unsqueeze operation as the input is already batched
+        image = image.to(self.device)
         with torch.no_grad():
             latent = self.vae.encode(image).latent_dist.sample()
             latent = latent * self.vae.config.scaling_factor
@@ -46,28 +33,23 @@ class StableDiffusionVAE:
 
 
 def process_and_save_image(vae, input_image, output_path, class_name):
+    # Ensure the input image is a 4D tensor (batch, channels, height, width)
+    if input_image.dim() == 3:
+        input_image = input_image.unsqueeze(0)
+
     # Preprocess and encode the input image
-    input_tensor = vae.preprocess(input_image)
     latent = vae.encode(input_image)
     reconstructed = vae.decode(latent)
 
-    # Print shapes
-    print(f"Input shape: {input_tensor.shape}")
-    print(f"Latent shape: {latent.shape}")
-    print(f"Reconstructed shape: {reconstructed.shape}")
-
     # Prepare input image
-    input_np = np.array(input_image.resize((256, 256)))
-
-    # Prepare latent representation
+    input_np = image.squeeze().cpu().numpy()
     latent_np = latent.float().squeeze().cpu().numpy()
     latent_np = np.mean(latent_np, axis=0)  # Average across channels
+    reconstructed_np = reconstructed.squeeze().cpu().numpy()
 
-    # Prepare reconstructed image
-    reconstructed_np = (
-        reconstructed.float().squeeze().permute(1, 2, 0).cpu().numpy() * 0.5 + 0.5
-    )
-    reconstructed_np = (reconstructed_np * 255).astype(np.uint8)
+    # Transpose from (C, H, W) to (H, W, C) for matplotlib
+    input_np = np.transpose(input_np, (1, 2, 0))
+    reconstructed_np = np.transpose(reconstructed_np, (1, 2, 0))
 
     # Create the visualization
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
@@ -98,7 +80,11 @@ def process_and_save_image(vae, input_image, output_path, class_name):
 
 
 if __name__ == "__main__":
-    dataset = load_imagenet_subset(num_samples=10)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dataset = load_imagenet_subset(num_samples=10, streaming=False)
+    dataset = PreprocessedDataset(dataset, device=device)
+
     output_dir = "output_visualizations"
     os.makedirs(output_dir, exist_ok=True)
 

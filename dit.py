@@ -1,21 +1,21 @@
+import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import math
 
 
 @dataclass
 class DiTConfig:
     image_size: int = 32  # Size of the input image
-    patch_size: int = 4  # Size of each patch
+    patch_size: int = 2  # Size of each patch
     in_channels: int = 4
     out_channels: int = 4  # Usually same as in_channels
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768  # Hidden dimension size
-    num_classes: int = 10
+    n_layer: int = 8
+    n_head: int = 8
+    n_embd: int = 512  # Hidden dimension size
+    num_classes: int = 5
 
     def __post_init__(self):
         self.block_size = (self.image_size // self.patch_size) ** 2
@@ -43,7 +43,7 @@ class MLP(nn.Module):
 
 
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return x * (1 + scale) + shift
 
 
 class SelfAttention(nn.Module):
@@ -90,6 +90,7 @@ class SelfAttention(nn.Module):
 
         return y
 
+
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -110,7 +111,8 @@ class SinusoidalPositionEmbeddings(nn.Module):
             )
 
         return embeddings
-    
+
+
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
@@ -138,29 +140,19 @@ class DiTBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
-        modulation = self.adaLN_modulation(c)  # Shape: [B, 6*C]
-        
-        # Reshape modulation parameters
-        modulation = modulation.view(B, 6, C)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation.unbind(dim=1)
-        
-        # Reshape modulation parameters to match x's dimensions
-        shift_msa = shift_msa.view(B, 1, C)
-        scale_msa = scale_msa.view(B, 1, C)
-        gate_msa = gate_msa.view(B, 1, C)
-        shift_mlp = shift_mlp.view(B, 1, C)
-        scale_mlp = scale_mlp.view(B, 1, C)
-        gate_mlp = gate_mlp.view(B, 1, C)
+        modulation = self.adaLN_modulation(c)  # Shape: (B, T, 6*C)
+        modulation = modulation[:, -1, :]  # Take the last token, shape: (B, 6*C)
+        modulation = modulation.view(B, 6, C)  # Reshape to (B, 6, C)
+
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            modulation.chunk(6, dim=1)
+        )
 
         # Self-attention
-        x = x + gate_msa * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa)
-        )
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
 
         # MLP
-        x = x + gate_mlp * self.mlp(
-            modulate(self.norm2(x), shift_mlp, scale_mlp)
-        )
+        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
 
         return x
 
@@ -168,6 +160,7 @@ class DiTBlock(nn.Module):
 class Patchify(nn.Module):
     def __init__(self, config: DiTConfig):
         super().__init__()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.config = config
         self.patch_size = config.patch_size
         self.projection = nn.Linear(
@@ -230,7 +223,7 @@ class FirstLayer(nn.Module):
             nn.Linear(config.n_embd, config.n_embd),
             nn.GELU(approximate="tanh"),
         )
-        
+
         # Class embedding
         self.y_embedder = nn.Embedding(config.num_classes, config.n_embd)
 
@@ -276,7 +269,12 @@ class FinalLayer(nn.Module):
         )
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        B, T, C = x.shape
+        modulation = self.adaLN_modulation(c)  # Shape: (B, T, 6*C)
+        modulation = modulation[:, -1, :]  # Take the last token, shape: (B, 6*C)
+        modulation = modulation.view(B, 2, C)  # Reshape to (B, 6, C)
+
+        shift, scale = modulation.chunk(2, dim=1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
@@ -364,16 +362,7 @@ class DiT(nn.Module):
 
 if __name__ == "__main__":
     # Set up the configuration
-    config = DiTConfig(
-        image_size=28,
-        patch_size=4,
-        in_channels=1,
-        out_channels=1,
-        n_layer=3,
-        n_head=4,
-        n_embd=128,
-        num_classes=10,
-    )
+    config = DiTConfig()
 
     # Instantiate the model
     model = DiT(config)
@@ -387,37 +376,33 @@ if __name__ == "__main__":
     y = torch.randint(0, config.num_classes, (batch_size,)).float()
 
     # Forward pass
-    try:
-        output = model(x, t, y)
-        print("Forward pass successful!")
-        print(f"Input shape: {x.shape}")
-        print(f"Output shape: {output.shape}")
-        print(f"Number of patches (block size): {config.block_size}")
+    output = model(x, t, y)
+    print("Forward pass successful!")
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {output.shape}")
+    print(f"Number of patches (block size): {config.block_size}")
 
-        # Check output shape
-        expected_shape = (
-            batch_size,
-            config.out_channels,
-            config.image_size,
-            config.image_size,
-        )
-        assert (
-            output.shape == expected_shape
-        ), f"Output shape {output.shape} doesn't match expected shape {expected_shape}"
-        print("Output shape is correct.")
+    # Check output shape
+    expected_shape = (
+        batch_size,
+        config.out_channels,
+        config.image_size,
+        config.image_size,
+    )
+    assert (
+        output.shape == expected_shape
+    ), f"Output shape {output.shape} doesn't match expected shape {expected_shape}"
+    print("Output shape is correct.")
 
-        # Check if output values are within a reasonable range
-        assert torch.isfinite(output).all(), "Output contains NaN or infinite values"
-        print("Output values are finite.")
+    # Check if output values are within a reasonable range
+    assert torch.isfinite(output).all(), "Output contains NaN or infinite values"
+    print("Output values are finite.")
 
-        # Check if the model is responsive to different inputs
-        output2 = model(x, t + 1, y)
-        assert not torch.allclose(
-            output, output2
-        ), "Model output doesn't change with different timesteps"
-        print("Model is responsive to different timesteps.")
+    # Check if the model is responsive to different inputs
+    output2 = model(x, t + 1, y)
+    assert not torch.allclose(
+        output, output2
+    ), "Model output doesn't change with different timesteps"
+    print("Model is responsive to different timesteps.")
 
-        print("All tests passed successfully!")
-
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+    print("All tests passed successfully!")

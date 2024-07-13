@@ -3,42 +3,30 @@ import os
 
 import pytorch_lightning as pl
 import torch
+from datasets import load_dataset
 from diffusers import DDPMScheduler
+from PIL import Image
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 import wandb
-from dataset import load_imagenet_subset
+from dataset import PreprocessedDataset, load_imagenet_subset
 from dit import DiT, DiTConfig
 from vae import StableDiffusionVAE
 
-# Set the start method for multiprocessing
-multiprocessing.set_start_method("spawn", force=True)
-
-
-class PreprocessedDataset(Dataset):
-    def __init__(self, original_dataset, vae):
-        self.original_dataset = original_dataset
-        self.vae = vae
-
-    def __len__(self):
-        return len(self.original_dataset)
-
-    def __getitem__(self, idx):
-        img, label, class_name = self.original_dataset[idx]
-        img_tensor = self.vae.preprocess(img)
-        return img_tensor, label, class_name
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
 class DiTLightning(pl.LightningModule):
-    def __init__(self, dit_config, vae_model_path):
+    def __init__(self, dit_config, device):
         super().__init__()
         self.save_hyperparameters()
-        self.net = DiT(dit_config)
-        self.vae = StableDiffusionVAE(vae_model_path)
+        self.net = DiT(dit_config).to(device)
+        self.vae = StableDiffusionVAE()
         self.loss_fn = nn.MSELoss()
         self.num_train_timesteps = 1000
         self.noise_scheduler = DDPMScheduler(
@@ -72,6 +60,9 @@ class DiTLightning(pl.LightningModule):
 
         # Compute loss
         loss = F.mse_loss(noise_pred, noise)
+        if not torch.isfinite(loss):
+            print(f"Non-finite loss detected: {loss}")
+            return None
 
         self.log(
             "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
@@ -82,7 +73,19 @@ class DiTLightning(pl.LightningModule):
         return torch.optim.AdamW(self.parameters(), lr=1e-4)
 
 
-def filter_dataset(dataset, num_classes=5, samples_per_class=100):
+def filter_dataset(dataset, num_classes=5, samples_per_class=None):
+    """
+    Filter the dataset to include a specified number of classes and samples per class.
+
+    Args:
+    dataset: The original dataset
+    num_classes (int): Number of classes to include
+    samples_per_class (int or None): Number of samples per class. If None, include all samples.
+
+    Returns:
+    Subset: A subset of the original dataset
+    list: List of selected class labels
+    """
     # Get unique classes
     all_classes = set(label for _, label, _ in dataset)
     selected_classes = list(all_classes)[:num_classes]
@@ -92,69 +95,39 @@ def filter_dataset(dataset, num_classes=5, samples_per_class=100):
         i for i, (_, label, _) in enumerate(dataset) if label in selected_classes
     ]
 
-    # Limit samples per class
-    class_counts = {label: 0 for label in selected_classes}
-    final_indices = []
-    for idx in tqdm(filtered_indices, desc="Filtering dataset"):
-        _, label, _ = dataset[idx]
-        if class_counts[label] < samples_per_class:
-            final_indices.append(idx)
-            class_counts[label] += 1
-        if all(count == samples_per_class for count in class_counts.values()):
-            break
+    if samples_per_class is None:
+        final_indices = filtered_indices
+    else:
+        # Limit samples per class
+        class_counts = {label: 0 for label in selected_classes}
+        final_indices = []
+        for idx in tqdm(filtered_indices, desc="Filtering dataset"):
+            _, label, _ = dataset[idx]
+            if class_counts[label] < samples_per_class:
+                final_indices.append(idx)
+                class_counts[label] += 1
+            if all(count == samples_per_class for count in class_counts.values()):
+                break
 
     return Subset(dataset, final_indices), selected_classes
 
 
-def save_class_images(dataset, selected_classes, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    saved_classes = set()
-
-    for img, label, class_name in tqdm(dataset, desc="Saving class images"):
-        if label in selected_classes and label not in saved_classes:
-            img_path = os.path.join(output_dir, f"{class_name}_{label}.png")
-            img.save(img_path)  # Save PIL Image directly
-            saved_classes.add(label)
-            print(f"Saved image for class {class_name} (label {label}) to {img_path}")
-
-        if len(saved_classes) == len(selected_classes):
-            break
-
-
 if __name__ == "__main__":
+    import warnings
+
+    warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
+
+    torch.set_float32_matmul_precision("medium")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     wandb_logger = WandbLogger(project="dit", log_model="all")
 
-    # Load ImageNet subset
-    full_dataset = load_imagenet_subset(
-        num_samples=10000
-    )  # Load more samples initially
+    dataset = load_dataset("imagenet-1k", split="train", use_auth_token=True)
 
-    # Filter dataset to 5 classes with 100 samples each
-    dataset, selected_classes = filter_dataset(
-        full_dataset, num_classes=5, samples_per_class=100
-    )
-
-    print(f"Training on classes: {selected_classes}")
     print(f"Total samples: {len(dataset)}")
 
-    # Save the first image of each selected class
-    save_class_images(dataset, selected_classes, "class_images")
-
-    # VAE model path
-    vae_model_path = "stabilityai/sd-vae-ft-mse"
-
     # Create preprocessed dataset
-    vae = StableDiffusionVAE(vae_model_path)
-    preprocessed_dataset = PreprocessedDataset(dataset, vae)
-
-    # Create DataLoader
-    train_dataloader = DataLoader(
-        preprocessed_dataset,
-        batch_size=32,
-        shuffle=True,
-        num_workers=4,
-        multiprocessing_context="spawn",
-    )
+    vae = StableDiffusionVAE()
+    preprocessed_dataset = PreprocessedDataset(dataset)
 
     # DiT Configuration
     dit_config = DiTConfig(
@@ -162,22 +135,40 @@ if __name__ == "__main__":
         patch_size=2,  # Adjusted for the latent space size
         in_channels=4,  # Latent channels from VAE
         out_channels=4,  # Latent channels for VAE
-        n_layer=8,  # Reduced number of layers for faster training
+        n_layer=12,  # Reduced number of layers for faster training
         n_head=8,  # Reduced number of heads
         n_embd=512,  # Reduced embedding dimension
-        num_classes=5,  # Now we only have 5 classes
+        num_classes=1000,  # Now we only have 5 classes
     )
 
     # Initialize the model
-    model = DiTLightning(dit_config, vae_model_path)
+    model = DiTLightning(dit_config, device)
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath="checkpoints",
+        filename='dit-{epoch:02d}-{step}-{train_loss:.2f}',
+        monitor='train_loss',
+        save_top_k=50,  # Save all checkpoints
+        every_n_train_steps=1000,
+        save_on_train_epoch_end=False,
+    )
 
     # Set up the trainer
     trainer = pl.Trainer(
-        max_epochs=200,  # Increased epochs for overfitting
+        max_epochs=1000,  # Increased epochs for overfitting
         logger=wandb_logger,
         log_every_n_steps=10,
         accelerator="auto",
         devices="auto",
+        callbacks=[checkpoint_callback],
+        max_steps=200000,
+    )
+
+    # Create DataLoader
+    train_dataloader = DataLoader(
+        preprocessed_dataset,
+        batch_size=256,
+        shuffle=True,
     )
 
     # Start training

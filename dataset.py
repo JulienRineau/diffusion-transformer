@@ -1,35 +1,103 @@
 import os
 import random
+from collections import defaultdict
 
 import cv2
 import numpy as np
+import torch
 from datasets import load_dataset
 from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms
+from tqdm import tqdm
 
 
-def load_imagenet_subset(num_samples=100, split="train"):
+def load_imagenet_subset(
+    num_classes=5, samples_per_class=20, split="train", streaming=False
+):
     """
     Load a subset of the ImageNet-1k dataset from Hugging Face,
-    keeping the original image resolution.
+    selecting a specified number of classes and samples per class.
 
     Args:
-    num_samples (int): Number of samples to load. Default is 100.
+    num_classes (int): Number of classes to include. Default is 5.
+    samples_per_class (int): Number of samples per class. Default is 20.
     split (str): Dataset split to use. Default is "train".
+    streaming (bool): Whether to use streaming mode. Default is True.
 
     Returns:
     list: A list of tuples, each containing (image, label, class_name).
+    list: List of selected class labels.
     """
-    dataset = load_dataset("imagenet-1k", split=split, use_auth_token=True)
-    labels = dataset.features["label"].names
+    print(f"Loading ImageNet-1k dataset (split: {split}, streaming: {streaming})")
+    dataset = load_dataset(
+        "imagenet-1k", split=split, use_auth_token=True, streaming=streaming
+    )
 
+    labels = dataset.features["label"].names
+    selected_classes = set()
+    class_counts = defaultdict(int)
     annotated_images = []
-    for sample in dataset.take(num_samples):
+
+    progress_bar = tqdm(desc=f"Processing samples for {num_classes} classes")
+
+    for sample in dataset:
         image = sample["image"]
         label = sample["label"]
         class_name = labels[label]
-        annotated_images.append((image, label, class_name))
 
-    return annotated_images
+        if len(selected_classes) < num_classes or label in selected_classes:
+            if class_counts[label] < samples_per_class:
+                annotated_images.append((image, label, class_name))
+                class_counts[label] += 1
+                selected_classes.add(label)
+                progress_bar.update(1)
+                progress_bar.set_postfix({"Current class": class_name})
+
+        if len(selected_classes) == num_classes and all(
+            count == samples_per_class for count in class_counts.values()
+        ):
+            break
+
+    progress_bar.close()
+    print(
+        f"Loaded {len(annotated_images)} samples from {len(selected_classes)} classes"
+    )
+
+    return annotated_images, list(selected_classes)
+
+
+class PreprocessedDataset(Dataset):
+    def __init__(self, original_dataset, size: int = 256, device: str = "cpu"):
+        self.original_dataset = original_dataset
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((size, size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+
+    def __len__(self):
+        return len(self.original_dataset)
+
+    def preprocess(self, image):
+        if isinstance(image, Image.Image):
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image = self.transform(image)
+        elif isinstance(image, torch.Tensor):
+            # If it's already a tensor, ensure it has 3 channels
+            if image.shape[0] == 1:
+                image = image.repeat(3, 1, 1)
+        return image.float()
+
+    def __getitem__(self, idx):
+        img = self.original_dataset[idx]["image"]
+        label = self.original_dataset[idx]["label"]
+        class_name = self.original_dataset.features["label"].names[label]
+        img_tensor = self.preprocess(img)
+        return img_tensor, label, class_name
 
 
 def save_images_with_overlay(dataset, output_dir):

@@ -8,18 +8,19 @@ import torch
 from datasets import load_dataset
 from diffusers import AutoencoderKL
 
-from dataset import PreprocessedDataset, load_imagenet_subset
+from dataset import PreprocessedDataset
 
 
 class StableDiffusionVAE:
     def __init__(self, model_path="stabilityai/sd-vae-ft-mse"):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
-        self.vae = AutoencoderKL.from_pretrained(model_path).to(self.device)
+        self.vae = AutoencoderKL.from_pretrained(model_path)
         self.vae.eval()
 
+    def to(self, device):
+        self.vae = self.vae.to(device)
+        return self
+
     def encode(self, image):
-        image = image.to(self.device)
         with torch.no_grad():
             latent = self.vae.encode(image).latent_dist.sample()
             latent = latent * self.vae.config.scaling_factor
@@ -82,8 +83,7 @@ def process_and_save_image(vae, input_image, output_path, class_name):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = load_imagenet_subset(num_samples=10, streaming=False)
-    dataset = PreprocessedDataset(dataset, device=device)
+    dataset = PreprocessedDataset("imagenet_subset_shards", size=256, device="cuda")
 
     output_dir = "output_visualizations"
     os.makedirs(output_dir, exist_ok=True)

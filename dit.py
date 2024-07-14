@@ -304,10 +304,6 @@ class DiT(nn.Module):
         super().__init__()
         self.config = config
 
-        self.patchify = Patchify(config)
-        self.pos_embedding = nn.Parameter(
-            torch.zeros(1, config.block_size, config.n_embd)
-        )
         self.first_layer = FirstLayer(config)
         self.blocks = nn.ModuleList([DiTBlock(config) for _ in range(config.n_layer)])
         self.final_layer = FinalLayer(config)

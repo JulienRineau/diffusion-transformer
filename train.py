@@ -38,9 +38,9 @@ class DiTLightning(pl.LightningModule):
             beta_schedule="squaredcos_cap_v2",
         )
         self.max_lr_steps = 2000
-        self.max_lr = 8e-4
+        self.max_lr = 9e-4
         self.min_lr = 6e-5
-        self.warmup_steps = 200
+        self.warmup_steps = 300
 
     def forward(self, x, t, class_labels):
         return self.net(x, t, class_labels)
@@ -162,9 +162,9 @@ if __name__ == "__main__":
         patch_size=2,
         in_channels=4,
         out_channels=4,
-        n_layer=12,
-        n_head=12,
-        n_embd=768,
+        n_layer=28,
+        n_head=16,
+        n_embd=1152,
         num_classes=preprocessed_dataset.num_classes,
     )
 
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     model = DiTLightning(dit_config)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat",
+        dirpath="checkpoints_cat_xl",
         filename="dit-{epoch:02d}-{step}-{train_loss:.2f}",
         monitor="train_loss",
         every_n_train_steps=20,
@@ -181,20 +181,21 @@ if __name__ == "__main__":
 
     # Set up the trainer
     trainer = pl.Trainer(
-        max_epochs=150,
+        max_epochs=200,
         logger=wandb_logger,
         precision="bf16-mixed",
         log_every_n_steps=1,
         accelerator="cuda",
         devices="8",
         strategy="ddp",
+        gradient_clip_val=1.0,
         callbacks=[checkpoint_callback],
     )
 
     # Create DataLoader
     train_dataloader = DataLoader(
         preprocessed_dataset,
-        batch_size=4,
+        batch_size=32,
         shuffle=True,
         num_workers=1,
         persistent_workers=True,

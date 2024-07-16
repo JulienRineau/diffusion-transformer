@@ -6,7 +6,7 @@ import torch
 from torchvision.utils import make_grid
 
 from dit import DiT, DiTConfig
-from train_mnist import DiTLightningMNIST
+from train import DiTLightning
 from vae import StableDiffusionVAE
 
 
@@ -15,19 +15,19 @@ def sample_dit(
     noise_scheduler,
     n_inference_steps=50,
     batch_size=8,
-    image_size=(1, 28, 28),
+    image_size=(4, 32, 32),  # Updated for latent space size
     device="cuda",
     class_labels=None,
 ):
     """
-    Sample images using the DiT model with class conditioning for MNIST.
+    Sample images using the DiT model with class conditioning for a single-class dataset.
 
     Args:
     model (nn.Module): The trained DiT model
     noise_scheduler (DDPMScheduler): The noise scheduler
     n_inference_steps (int): Number of inference steps
     batch_size (int): Number of images to generate
-    image_size (tuple): Size of the MNIST image (channels, height, width)
+    image_size (tuple): Size of the image in latent space (channels, height, width)
     device (str): Device to run the model on ('cuda' or 'cpu')
     class_labels (torch.Tensor): Tensor of class labels for conditioning
 
@@ -42,9 +42,7 @@ def sample_dit(
     pred_output_history = []
 
     if class_labels is None:
-        class_labels = torch.randint(0, 10, (batch_size,)).to(
-            device
-        )  # MNIST has 10 classes
+        class_labels = torch.zeros(batch_size, dtype=torch.long, device=device)
     else:
         class_labels = class_labels.to(device)
 
@@ -74,16 +72,18 @@ def sample_dit(
 
 
 def visualize_sampling_process(
+    vae,
     step_history,
     pred_output_history,
     class_labels,
-    save_path="dit_mnist_sampling_visualization.png",
+    save_path="dit_cat_sampling_visualization.png",
     steps_to_visualize=None,
 ):
     """
-    Visualize the sampling process for MNIST in a single image.
+    Visualize the sampling process for the cat dataset in a single image.
 
     Args:
+    vae (StableDiffusionVAE): The VAE model for decoding latents
     step_history (list): List of tensors representing the sampling steps
     pred_output_history (list): List of tensors representing the model predictions
     class_labels (torch.Tensor): Tensor of class labels used for conditioning
@@ -108,10 +108,13 @@ def visualize_sampling_process(
     axs[0][1].set_title("Predicted Noise")
 
     for idx, i in enumerate(steps_to_visualize):
+        # Decode latents to images
+        with torch.no_grad():
+            images = vae.decode(step_history[i].to(vae.vae.device))
+
         # Plot generated image
-        images = step_history[i]
         images = (images + 1) / 2.0  # Rescale from [-1, 1] to [0, 1]
-        axs[idx][0].imshow(make_grid(images, nrow=4).permute(1, 2, 0), cmap="gray")
+        axs[idx][0].imshow(make_grid(images.cpu(), nrow=4).permute(1, 2, 0))
         axs[idx][0].axis("off")
 
         # Plot predicted noise
@@ -124,7 +127,7 @@ def visualize_sampling_process(
         axs[idx][0].set_ylabel(f"Step {n_steps - i}")
 
     # Add class labels to the plot
-    fig.suptitle(f"Generated MNIST Digits: {class_labels.tolist()}", fontsize=16)
+    fig.suptitle(f"Generated Cat Images", fontsize=16)
 
     plt.tight_layout()
     plt.savefig(save_path)
@@ -137,8 +140,8 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # Load the model from checkpoint
-    checkpoint_path = "checkpoints_mnist_2/dit-mnist-epoch=19-step=18100-train_loss=0.03.ckpt"  # Update this path
-    model = DiTLightningMNIST.load_from_checkpoint(checkpoint_path)
+    checkpoint_path = "checkpoints_cat/dit-epoch=27-step=2180-train_loss=0.26.ckpt"  # Update this path
+    model = DiTLightning.load_from_checkpoint(checkpoint_path)
     model = model.to(device)
     print("Model loaded successfully")
 
@@ -147,11 +150,11 @@ if __name__ == "__main__":
 
     # Set inference parameters
     n_inference_steps = 1000
-    batch_size = 8
-    image_size = (1, 28, 28)  # MNIST image size
+    batch_size = 4
+    image_size = (4, 32, 32)  # Latent space size for 256x256 images
 
-    # Set class labels for conditioning (generate 8 random digit classes)
-    class_labels = torch.randint(0, 10, (batch_size,)).to(device)
+    # Set class labels for conditioning (all zeros for single-class dataset)
+    class_labels = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     # Perform sampling
     step_history, pred_output_history = sample_dit(
@@ -166,14 +169,18 @@ if __name__ == "__main__":
     print("Sampling completed")
 
     # Specify the steps you want to visualize
-    steps_to_visualize = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 999]
+    steps_to_visualize = [0, 200, 400, 600, 800, 999]
 
-    # Visualize and save the results
+    vae = StableDiffusionVAE().to(device)
+
+    # Then update the visualization call:
     visualize_sampling_process(
+        vae,
         step_history,
         pred_output_history,
         class_labels,
-        "dit_mnist_sampling_visualization.png",
+        "dit_cat_sampling_visualization.png",
         steps_to_visualize=steps_to_visualize,
     )
+
     print("Process completed")

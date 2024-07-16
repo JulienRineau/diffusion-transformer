@@ -115,6 +115,7 @@ class DiTLightning(pl.LightningModule):
             "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
         )
         self.log("learning_rate", current_lr, on_step=True, logger=True)
+
         return loss
 
     def configure_optimizers(self):
@@ -184,8 +185,9 @@ if __name__ == "__main__":
         logger=wandb_logger,
         precision="bf16-mixed",
         log_every_n_steps=1,
-        accelerator="auto",
-        devices="auto",
+        accelerator="cuda",
+        devices="8",
+        strategy="ddp",
         callbacks=[checkpoint_callback],
     )
 

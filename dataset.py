@@ -98,7 +98,7 @@ class PreprocessedCatDataset(Dataset):
         sample = self.dataset[idx]
         img = sample["image"]
         img_tensor = self.preprocess(img)
-        label = 2  # Fixed label for all cat images
+        label = 0  # Fixed label for all cat images
         return img_tensor, label, "cat"  # Returning "cat" as class_name for consistency
 
     @property

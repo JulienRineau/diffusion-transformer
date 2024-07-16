@@ -21,23 +21,38 @@ class DiTConfig:
         self.block_size = (self.image_size // self.patch_size) ** 2
 
 
-class MLP(nn.Module):
-    """
-    Attributes:
-        fc (nn.Linear): The first fully connected layer.
-        gelu (nn.GELU): Gaussian Error Linear Unit activation layer.
-        proj (nn.Linear): The second fully connected layer projecting back to embedding dimension.
-    """
-
+class MLPWithDepthwiseConv(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate="tanh")
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
+        # Add depthwise convolution
+        self.depthwise_conv = nn.Conv2d(
+            4 * config.n_embd,
+            4 * config.n_embd,
+            kernel_size=3,
+            padding=1,
+            groups=4 * config.n_embd,
+        )
+
     def forward(self, x):
+        b, t, c = x.shape
+
         x = self.c_fc(x)
         x = self.gelu(x)
+
+        # Reshape for depthwise convolution
+        h = w = int(math.sqrt(t))
+        x = x.transpose(1, 2).view(b, 4 * c, h, w)
+
+        # Apply depthwise convolution
+        x = self.depthwise_conv(x)
+
+        # Reshape back
+        x = x.view(b, 4 * c, t).transpose(1, 2)
+
         x = self.c_proj(x)
         return x
 
@@ -131,7 +146,7 @@ class DiTBlock(nn.Module):
         self.attn = SelfAttention(config)
 
         # MLP
-        self.mlp = MLP(config)
+        self.mlp = MLPWithDepthwiseConv(config)
 
         # AdaLN-Zero modulation
         self.adaLN_modulation = nn.Sequential(

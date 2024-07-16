@@ -38,9 +38,9 @@ class DiTLightning(pl.LightningModule):
             beta_schedule="squaredcos_cap_v2",
         )
         self.max_lr_steps = 2000
-        self.max_lr = 9e-4
-        self.min_lr = 6e-5
-        self.warmup_steps = 300
+        self.max_lr = 1e-3
+        self.min_lr = 3e-4
+        self.warmup_steps = 500
 
     def forward(self, x, t, class_labels):
         return self.net(x, t, class_labels)

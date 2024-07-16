@@ -7,8 +7,10 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from diffusers import AutoencoderKL
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from dataset import PreprocessedDataset
+from dataset import PreprocessedCatDataset, PreprocessedDataset
 
 
 class StableDiffusionVAE:
@@ -42,11 +44,14 @@ def process_and_save_image(vae, input_image, output_path, class_name):
     latent = vae.encode(input_image)
     reconstructed = vae.decode(latent)
 
-    # Prepare input image
-    input_np = image.squeeze().cpu().numpy()
+    # Denormalize the input and reconstructed images
+    def denormalize(img):
+        return (img * 0.5 + 0.5).clamp(0, 1)
+
+    input_np = denormalize(input_image).squeeze().cpu().numpy()
     latent_np = latent.float().squeeze().cpu().numpy()
     latent_np = np.mean(latent_np, axis=0)  # Average across channels
-    reconstructed_np = reconstructed.squeeze().cpu().numpy()
+    reconstructed_np = denormalize(reconstructed).squeeze().cpu().numpy()
 
     # Transpose from (C, H, W) to (H, W, C) for matplotlib
     input_np = np.transpose(input_np, (1, 2, 0))
@@ -76,23 +81,40 @@ def process_and_save_image(vae, input_image, output_path, class_name):
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
-
     print(f"Saved visualization to {output_path}")
 
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = PreprocessedDataset("imagenet_subset_shards", size=256, device="cuda")
+    # Load the dataset
+    print("Loading the Smithsonian Butterflies dataset...")
+    original_dataset = load_dataset("huggan/cats", split="train")
+
+    # Create the PreprocessedDataset
+    print("Creating PreprocessedDataset...")
+    dataset = PreprocessedCatDataset(dataset=original_dataset, size=256, device=device)
 
     output_dir = "output_visualizations"
     os.makedirs(output_dir, exist_ok=True)
 
     # Initialize VAE once
-    vae = StableDiffusionVAE()
+    vae = StableDiffusionVAE().to(device)
 
-    for idx, (image, label, class_name) in enumerate(dataset):
+    # Use DataLoader for efficient batching
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+    # Process a subset of images (e.g., 20)
+    num_samples = 20
+    for idx, (image, label, class_name) in enumerate(
+        tqdm(dataloader, total=num_samples)
+    ):
+        if idx >= num_samples:
+            break
+
         output_path = os.path.join(
-            output_dir, f"visualization_{idx:03d}_{class_name}.png"
+            output_dir, f"visualization_cat_{idx:03d}_{class_name[0]}.png"
         )
-        process_and_save_image(vae, image, output_path, class_name)
+        process_and_save_image(vae, image, output_path, class_name[0])
+
+    print(f"Processed {num_samples} images. Visualizations saved in {output_dir}")

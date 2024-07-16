@@ -1,37 +1,30 @@
 import gc
 import logging
 import math
-import multiprocessing
 import os
 import warnings
 
 import pytorch_lightning as pl
 import torch
-from datasets import load_dataset
 from diffusers import DDPMScheduler
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 from tqdm import tqdm
 
 import wandb
-from dataset import PreprocessedDataset, PreprocessedCatDataset
 from dit import DiT, DiTConfig
-from vae import StableDiffusionVAE
-
-multiprocessing.set_start_method("spawn", force=True)
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
-class DiTLightning(pl.LightningModule):
+class DiTLightningMNIST(pl.LightningModule):
     def __init__(self, dit_config):
         super().__init__()
         self.save_hyperparameters()
         self.net = DiT(dit_config)
-        self.vae = StableDiffusionVAE()
         self.num_train_timesteps = 1000
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.num_train_timesteps,
@@ -62,7 +55,6 @@ class DiTLightning(pl.LightningModule):
         optimizer,
         optimizer_closure: bool = None,
     ):
-        # Set the learning rate
         it = self.trainer.global_step
         lr = self.get_lr(it)
         for param_group in optimizer.param_groups:
@@ -74,34 +66,29 @@ class DiTLightning(pl.LightningModule):
             for param_group in self.trainer.optimizers[0].param_groups:
                 param_group["lr"] = self.min_lr
 
-    def setup(self, stage=None):
-        # Ensure VAE is on the correct device and in eval mode
-        self.vae.vae = self.vae.vae.to(self.device)
-        self.vae.vae.eval()
-        for param in self.vae.vae.parameters():
-            param.requires_grad = False
-
     def training_step(self, batch, batch_idx):
-        images, class_labels, _ = batch
+        images, class_labels = batch
 
-        # Ensure images are in bfloat16
-        images = images.to(torch.bfloat16)
+        # Add channel dimension if necessary
+        if images.shape[1] == 28:
+            images = images.unsqueeze(1)
 
-        latents = self.vae.encode(images)
+        # Normalize images to [-1, 1]
+        images = images * 2 - 1
 
-        # Sample noise to add to the latents
-        noise = torch.randn_like(latents)
+        # Sample noise to add to the images
+        noise = torch.randn_like(images)
 
         # Sample a random timestep for each image
         timesteps = torch.randint(
-            0, self.num_train_timesteps, (latents.shape[0],), device=self.device
+            0, self.num_train_timesteps, (images.shape[0],), device=self.device
         ).long()
 
-        # Add noise to the latents according to the noise magnitude at each timestep
-        noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        # Add noise to the images according to the noise magnitude at each timestep
+        noisy_images = self.noise_scheduler.add_noise(images, noise, timesteps)
 
         # Predict the noise residual
-        noise_pred = self.net(noisy_latents, timesteps, class_labels)
+        noise_pred = self.net(noisy_images, timesteps, class_labels)
 
         # Compute loss
         loss = F.mse_loss(noise_pred, noise)
@@ -141,49 +128,51 @@ if __name__ == "__main__":
 
     torch.set_float32_matmul_precision("medium")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    wandb_logger = WandbLogger(project="dit-cats", log_model="all")
 
-    vae = StableDiffusionVAE()
+    wandb.init(project="dit-mnist", save_code=True, mode="online")
+    wandb_logger = WandbLogger(log_model=False)
 
-    logging.info("Loading the dataset...")
-    original_dataset = load_dataset("huggan/cats", split="train")
-
-    logging.info("Creating PreprocessedDataset...")
-    preprocessed_dataset = PreprocessedCatDataset(
-        dataset=original_dataset,
-        size=256,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+    # Load MNIST dataset
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+        ]
+    )
+    mnist_train = datasets.MNIST(
+        root="./data", train=True, download=True, transform=transform
     )
 
-    # DiT Configuration
+    # DiT Configuration for MNIST
     dit_config = DiTConfig(
-        image_size=32,
+        image_size=28,  # MNIST image size
         patch_size=2,
-        in_channels=4,
-        out_channels=4,
+        in_channels=1,  # MNIST is grayscale
+        out_channels=1,
         n_layer=12,
-        n_head=12,
-        n_embd=768,
-        num_classes=preprocessed_dataset.num_classes,
+        n_head=8,
+        n_embd=384,
+        num_classes=10,  # MNIST has 10 classes
     )
 
     # Initialize the model
-    model = DiTLightning(dit_config)
+    model = DiTLightningMNIST(dit_config)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat",
-        filename="dit-{epoch:02d}-{step}-{train_loss:.2f}",
+        dirpath="checkpoints_mnist_2",
+        filename="dit-mnist-{epoch:02d}-{step}-{train_loss:.2f}",
         monitor="train_loss",
-        every_n_train_steps=20,
-        save_on_train_epoch_end=False,
+        every_n_train_steps=100,
+        save_top_k=3,
+        mode="min",
+        save_last=True,
     )
 
     # Set up the trainer
     trainer = pl.Trainer(
-        max_epochs=150,
+        max_epochs=20,
         logger=wandb_logger,
         precision="bf16-mixed",
-        log_every_n_steps=1,
+        log_every_n_steps=10,
         accelerator="auto",
         devices="auto",
         callbacks=[checkpoint_callback],
@@ -191,10 +180,10 @@ if __name__ == "__main__":
 
     # Create DataLoader
     train_dataloader = DataLoader(
-        preprocessed_dataset,
-        batch_size=4,
+        mnist_train,
+        batch_size=64,
         shuffle=True,
-        num_workers=1,
+        num_workers=4,
         persistent_workers=True,
     )
 

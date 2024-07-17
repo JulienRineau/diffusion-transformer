@@ -27,7 +27,7 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 @dataclass
 class TrainerConfig:
     batch_size: int = 32
-    lr: int = 15e-4
+    lr: int = 1e-4
 
 
 class DiTLightning(pl.LightningModule):

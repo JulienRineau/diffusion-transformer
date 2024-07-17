@@ -1,16 +1,11 @@
 import os
-import random
-
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from datasets import load_dataset
 from diffusers import AutoencoderKL
-from torch.utils.data import DataLoader
+from torchvision import transforms
 from tqdm import tqdm
-
-from dataset import PreprocessedCatDataset, PreprocessedDataset
 
 
 class StableDiffusionVAE:
@@ -41,22 +36,19 @@ def process_and_save_image(vae, input_image, output_path, class_name):
     if input_image.dim() == 3:
         input_image = input_image.unsqueeze(0)
 
-    # Preprocess and encode the input image
+    # Encode and decode the input image
     latent = vae.encode(input_image)
     reconstructed = vae.decode(latent)
 
-    # Denormalize the input and reconstructed images
-    def denormalize(img):
-        return (img * 0.5 + 0.5).clamp(0, 1)
-
-    input_np = denormalize(input_image).squeeze().cpu().numpy()
+    # Convert tensors to numpy arrays
+    input_np = input_image.squeeze().permute(1, 2, 0).cpu().numpy()
     latent_np = latent.float().squeeze().cpu().numpy()
     latent_np = np.mean(latent_np, axis=0)  # Average across channels
-    reconstructed_np = denormalize(reconstructed).squeeze().cpu().numpy()
+    reconstructed_np = reconstructed.squeeze().permute(1, 2, 0).cpu().numpy()
 
-    # Transpose from (C, H, W) to (H, W, C) for matplotlib
-    input_np = np.transpose(input_np, (1, 2, 0))
-    reconstructed_np = np.transpose(reconstructed_np, (1, 2, 0))
+    # Clip values to [0, 1] range
+    input_np = np.clip(input_np, 0, 1)
+    reconstructed_np = np.clip(reconstructed_np, 0, 1)
 
     # Create the visualization
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
@@ -89,33 +81,33 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the dataset
-    print("Loading the Smithsonian Butterflies dataset...")
-    original_dataset = load_dataset("huggan/cats", split="train")
+    print("Loading the cat dataset...")
+    dataset = load_dataset("huggan/cats", split="train")
 
-    # Create the PreprocessedDataset
-    print("Creating PreprocessedDataset...")
-    dataset = PreprocessedCatDataset(dataset=original_dataset, size=256, device=device)
+    # Initialize VAE
+    vae = StableDiffusionVAE().to(device)
+
+    # Define transform
+    transform = transforms.Compose(
+        [
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ]
+    )
 
     output_dir = "output_visualizations"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize VAE once
-    vae = StableDiffusionVAE().to(device)
-
-    # Use DataLoader for efficient batching
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-
     # Process a subset of images (e.g., 20)
     num_samples = 20
-    for idx, (image, label, class_name) in enumerate(
-        tqdm(dataloader, total=num_samples)
-    ):
-        if idx >= num_samples:
-            break
+    for idx in tqdm(range(num_samples), desc="Processing images"):
+        sample = dataset[idx]
+        image = sample["image"]
 
-        output_path = os.path.join(
-            output_dir, f"visualization_cat_{idx:03d}_{class_name[0]}.png"
-        )
-        process_and_save_image(vae, image, output_path, class_name[0])
+        # Apply transform
+        image_tensor = transform(image).unsqueeze(0).to(device)
+
+        output_path = os.path.join(output_dir, f"visualization_cat_{idx:03d}.png")
+        process_and_save_image(vae, image_tensor, output_path, "Cat")
 
     print(f"Processed {num_samples} images. Visualizations saved in {output_dir}")

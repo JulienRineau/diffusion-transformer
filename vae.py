@@ -17,6 +17,7 @@ class StableDiffusionVAE:
     def __init__(self, model_path="stabilityai/sd-vae-ft-mse"):
         self.vae = AutoencoderKL.from_pretrained(model_path)
         self.vae.eval()
+        self.scaling_factor = 0.18215
 
     def to(self, device):
         self.vae = self.vae.to(device)
@@ -25,11 +26,11 @@ class StableDiffusionVAE:
     def encode(self, image):
         with torch.no_grad():
             latent = self.vae.encode(image).latent_dist.sample()
-            latent = latent * self.vae.config.scaling_factor
+            latent = latent * self.scaling_factor
         return latent
 
     def decode(self, latent):
-        latent = latent / self.vae.config.scaling_factor
+        latent = latent / self.scaling_factor
         with torch.no_grad():
             image = self.vae.decode(latent).sample
         return image

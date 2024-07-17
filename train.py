@@ -1,9 +1,9 @@
 import gc
 import logging
-import math
 import multiprocessing
 import os
 import warnings
+from dataclasses import dataclass
 
 import pytorch_lightning as pl
 import torch
@@ -11,13 +11,11 @@ from datasets import load_dataset
 from diffusers import DDPMScheduler
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Subset
-from tqdm import tqdm
+from torch.utils.data import DataLoader
 
 import wandb
-from dataset import PreprocessedDataset, PreprocessedCatDataset
+from dataset import PreprocessedCatDataset, PreprocessedDataset
 from dit import DiT, DiTConfig
 from vae import StableDiffusionVAE
 
@@ -26,8 +24,18 @@ multiprocessing.set_start_method("spawn", force=True)
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
+@dataclass
+class TrainerConfig:
+    batch_size: int = 32
+    lr: int = 1e-4
+
+
 class DiTLightning(pl.LightningModule):
-    def __init__(self, dit_config):
+    def __init__(
+        self,
+        dit_config,
+        trainer_config: TrainerConfig,
+    ):
         super().__init__()
         self.save_hyperparameters()
         self.net = DiT(dit_config)
@@ -37,42 +45,11 @@ class DiTLightning(pl.LightningModule):
             num_train_timesteps=self.num_train_timesteps,
             beta_schedule="squaredcos_cap_v2",
         )
-        self.max_lr_steps = 2000
-        self.max_lr = 1e-3
-        self.min_lr = 3e-4
-        self.warmup_steps = 500
+        self.lr = trainer_config.lr
+        self.batch_size = trainer_config.batch_size
 
     def forward(self, x, t, class_labels):
         return self.net(x, t, class_labels)
-
-    def get_lr(self, it):
-        if it < self.warmup_steps:
-            return self.max_lr * (it + 1) / self.warmup_steps
-        if it > self.max_lr_steps:
-            return self.min_lr
-        decay_ratio = (it - self.warmup_steps) / (self.max_lr_steps - self.warmup_steps)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return self.min_lr + coeff * (self.max_lr - self.min_lr)
-
-    def optimizer_step(
-        self,
-        epoch,
-        batch_idx,
-        optimizer,
-        optimizer_closure: bool = None,
-    ):
-        # Set the learning rate
-        it = self.trainer.global_step
-        lr = self.get_lr(it)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
-        optimizer.step(closure=optimizer_closure)
-
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if self.trainer.global_step >= self.max_lr_steps:
-            for param_group in self.trainer.optimizers[0].param_groups:
-                param_group["lr"] = self.min_lr
 
     def setup(self, stage=None):
         # Ensure VAE is on the correct device and in eval mode
@@ -84,23 +61,15 @@ class DiTLightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         images, class_labels, _ = batch
 
-        # Ensure images are in bfloat16
         images = images.to(torch.bfloat16)
-
         latents = self.vae.encode(images)
-
-        # Sample noise to add to the latents
         noise = torch.randn_like(latents)
 
-        # Sample a random timestep for each image
         timesteps = torch.randint(
             0, self.num_train_timesteps, (latents.shape[0],), device=self.device
         ).long()
 
-        # Add noise to the latents according to the noise magnitude at each timestep
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-
-        # Predict the noise residual
         noise_pred = self.net(noisy_latents, timesteps, class_labels)
 
         # Compute loss
@@ -109,22 +78,21 @@ class DiTLightning(pl.LightningModule):
             print(f"Non-finite loss detected: {loss}")
             return None
 
-        current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-
         self.log(
-            "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+            "train_loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+            batch_size=self.batch_size,
         )
-        self.log("learning_rate", current_lr, on_step=True, logger=True)
 
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            weight_decay=0.1,
-            betas=[0.9, 0.95],
-            eps=1e-8,
-        )
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
         return optimizer
 
 
@@ -142,7 +110,10 @@ if __name__ == "__main__":
 
     torch.set_float32_matmul_precision("medium")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    wandb_logger = WandbLogger(project="dit-cats", log_model="all")
+
+    # Configure Wandb to log metrics but not save artifacts
+    wandb.init(project="dit-cats", save_code=True, mode="online")
+    wandb_logger = WandbLogger(log_model=False)
 
     vae = StableDiffusionVAE()
 
@@ -156,26 +127,29 @@ if __name__ == "__main__":
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
+    trainer_config = TrainerConfig(batch_size=32, lr=1e-4)
+
     # DiT Configuration
     dit_config = DiTConfig(
         image_size=32,
         patch_size=2,
         in_channels=4,
         out_channels=4,
-        n_layer=28,
-        n_head=16,
-        n_embd=1152,
+        n_layer=12,
+        n_head=12,
+        n_embd=768,
         num_classes=preprocessed_dataset.num_classes,
     )
 
     # Initialize the model
-    model = DiTLightning(dit_config)
+    model = DiTLightning(dit_config, trainer_config)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat_xl",
+        dirpath="checkpoints_cat_reddit_fix",
         filename="dit-{epoch:02d}-{step}-{train_loss:.2f}",
         monitor="train_loss",
-        every_n_train_steps=20,
+        every_n_train_steps=40,
+        save_top_k=4,
         save_on_train_epoch_end=False,
     )
 
@@ -195,7 +169,7 @@ if __name__ == "__main__":
     # Create DataLoader
     train_dataloader = DataLoader(
         preprocessed_dataset,
-        batch_size=32,
+        batch_size=trainer_config.batch_size,
         shuffle=True,
         num_workers=1,
         persistent_workers=True,

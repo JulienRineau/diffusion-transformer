@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 from torch.nn import functional as F
 
 
@@ -45,13 +46,13 @@ class MLPWithDepthwiseConv(nn.Module):
 
         # Reshape for depthwise convolution
         h = w = int(math.sqrt(t))
-        x = x.transpose(1, 2).view(b, 4 * c, h, w)
+        x = x.transpose(1, 2).view(b, 4 * c, h, w).contiguous()
 
         # Apply depthwise convolution
         x = self.depthwise_conv(x)
 
         # Reshape back
-        x = x.view(b, 4 * c, t).transpose(1, 2)
+        x = x.view(b, 4 * c, t).transpose(1, 2).contiguous()
 
         x = self.c_proj(x)
         return x
@@ -230,17 +231,28 @@ class FirstLayer(nn.Module):
         self.patchify = Patchify(config)
 
         # Positional embedding
-        self.pos_embed = nn.Parameter(torch.zeros(1, config.block_size, config.n_embd))
+        self.pos_embed = nn.Parameter(
+            self._get_sinusoidal_embeddings(config.block_size, config.n_embd)
+        )
 
         # Timestep embedding
         self.t_embedder = nn.Sequential(
             SinusoidalPositionEmbeddings(config.n_embd),
             nn.Linear(config.n_embd, config.n_embd),
             nn.GELU(approximate="tanh"),
+            nn.Linear(config.n_embd, config.n_embd),
         )
 
         # Class embedding
         self.y_embedder = nn.Embedding(config.num_classes, config.n_embd)
+
+    def _get_sinusoidal_embeddings(self, n_position, d_hid):
+        position = torch.arange(n_position).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_hid, 2) * -(math.log(10000.0) / d_hid))
+        pos_embedding = torch.zeros(1, n_position, d_hid)
+        pos_embedding[0, :, 0::2] = torch.sin(position * div_term)
+        pos_embedding[0, :, 1::2] = torch.cos(position * div_term)
+        return pos_embedding
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> tuple:
         """
@@ -323,6 +335,19 @@ class DiT(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(config) for _ in range(config.n_layer)])
         self.final_layer = FinalLayer(config)
 
+    def _init_weights(self):
+        # Initialize final layer weights to zero
+        init.zeros_(self.final_layer.linear.weight)
+        init.zeros_(self.final_layer.linear.bias)
+
+        # Initialize adaLN weights to zero
+        init.zeros_(self.final_layer.adaLN_modulation[-1].weight)
+        init.zeros_(self.final_layer.adaLN_modulation[-1].bias)
+
+        for block in self.blocks:
+            init.zeros_(block.adaLN_modulation[-1].weight)
+            init.zeros_(block.adaLN_modulation[-1].bias)
+
     def forward(
         self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor
     ) -> torch.Tensor:
@@ -336,18 +361,6 @@ class DiT(nn.Module):
 
         Returns:
             torch.Tensor: Output image tensor of shape (batch_size, out_channels, image_size, image_size).
-
-        Raises:
-            ValueError: If input tensor shapes are inconsistent with the model configuration.
-
-        Note:
-            This method processes the input through the following steps:
-            1. Patchify and embed the input image.
-            2. Add positional embeddings.
-            3. Process through DiT blocks.
-            4. Apply the final layer.
-            5. Reshape the output back to image format.
-
         """
         x, c = self.first_layer(x, t, y)
         for block in self.blocks:

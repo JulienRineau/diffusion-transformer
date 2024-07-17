@@ -6,7 +6,7 @@ import torch
 from torchvision.utils import make_grid
 
 from dit import DiT, DiTConfig
-from train import DiTLightning
+from train import DiTLightning, TrainerConfig
 from vae import StableDiffusionVAE
 
 
@@ -140,7 +140,9 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # Load the model from checkpoint
-    checkpoint_path = "checkpoints_cat/dit-epoch=27-step=2180-train_loss=0.26.ckpt"  # Update this path
+    checkpoint_path = (
+        "checkpoints_cat_reddit_fix/dit-epoch=161-step=12760-train_loss=0.23.ckpt"
+    )
     model = DiTLightning.load_from_checkpoint(checkpoint_path)
     model = model.to(device)
     print("Model loaded successfully")
@@ -151,7 +153,7 @@ if __name__ == "__main__":
     # Set inference parameters
     n_inference_steps = 1000
     batch_size = 4
-    image_size = (4, 32, 32)  # Latent space size for 256x256 images
+    image_size = (4, 32, 32)
 
     # Set class labels for conditioning (all zeros for single-class dataset)
     class_labels = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -179,7 +181,7 @@ if __name__ == "__main__":
         step_history,
         pred_output_history,
         class_labels,
-        "dit_cat_sampling_visualization.png",
+        "dit_cat_sampling_visualization_reddit.png",
         steps_to_visualize=steps_to_visualize,
     )
 

@@ -11,11 +11,8 @@ from torch.utils.data import Dataset as TorchDataset
 from torchvision import transforms
 from tqdm import tqdm
 
-from dataset import (
-    PreprocessedDataset,
-    PreprocessedCatDataset,
-    visualize_dataset_samples,
-)
+from dataset import (PreprocessedCatDataset, PreprocessedDataset,
+                     visualize_dataset_samples)
 
 
 def save_image_stack(

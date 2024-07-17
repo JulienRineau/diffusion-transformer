@@ -27,18 +27,14 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 @dataclass
 class TrainerConfig:
     batch_size: int = 32
-    lr: int = 1e-4
+    lr: int = 15e-4
 
 
 class DiTLightning(pl.LightningModule):
-    def __init__(
-        self,
-        dit_config,
-        trainer_config: TrainerConfig,
-    ):
+    def __init__(self, dit_config, trainer_config: TrainerConfig, skip_init=False):
         super().__init__()
         self.save_hyperparameters()
-        self.net = DiT(dit_config)
+        self.net = DiT(dit_config, skip_init=skip_init)
         self.vae = StableDiffusionVAE()
         self.num_train_timesteps = 1000
         self.noise_scheduler = DDPMScheduler(
@@ -104,6 +100,26 @@ def clean_cuda_memory():
     torch.cuda.reset_peak_memory_stats()
 
 
+def load_model_from_checkpoint(checkpoint_path, device):
+    # Load the checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Extract the configuration from the checkpoint
+    dit_config = DiTConfig(**checkpoint["hyper_parameters"]["dit_config"])
+    trainer_config = TrainerConfig(**checkpoint["hyper_parameters"]["trainer_config"])
+
+    # Create a new model instance
+    model = DiTLightning(dit_config, trainer_config, skip_init=True)
+
+    # Load the state dict
+    model.load_state_dict(checkpoint["state_dict"])
+
+    # Move the model to the specified device
+    model = model.to(device)
+
+    return model
+
+
 if __name__ == "__main__":
     clean_cuda_memory()
     warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
@@ -144,13 +160,26 @@ if __name__ == "__main__":
     # Initialize the model
     model = DiTLightning(dit_config, trainer_config)
 
+    # Load the weights from the checkpoint
+    checkpoint = torch.load(
+        "checkpoints_cat_reddit_fix/dit-epoch=161-step=12760-train_loss=0.23.ckpt",
+        map_location=device,
+    )
+    model.load_state_dict(checkpoint["state_dict"])
+
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat_reddit_fix",
+        dirpath="checkpoints_cat_reddit_fix_v2",
         filename="dit-{epoch:02d}-{step}-{train_loss:.2f}",
         monitor="train_loss",
         every_n_train_steps=40,
         save_top_k=4,
         save_on_train_epoch_end=False,
+    )
+
+    last_checkpoint_callback = ModelCheckpoint(
+        dirpath="checkpoints_cat_reddit_fix_v2",
+        filename="dit-last-{epoch:02d}-{step}-{train_loss:.2f}",
+        save_last=True,
     )
 
     # Set up the trainer
@@ -163,7 +192,7 @@ if __name__ == "__main__":
         devices="8",
         strategy="ddp",
         gradient_clip_val=1.0,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, last_checkpoint_callback],
     )
 
     # Create DataLoader
@@ -175,6 +204,5 @@ if __name__ == "__main__":
         persistent_workers=True,
     )
 
-    # Start training
     trainer.fit(model, train_dataloader)
     wandb.finish()

@@ -327,7 +327,7 @@ class DiT(nn.Module):
 
     """
 
-    def __init__(self, config: DiTConfig):
+    def __init__(self, config: DiTConfig, skip_init=False):
         super().__init__()
         self.config = config
 
@@ -335,7 +335,10 @@ class DiT(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(config) for _ in range(config.n_layer)])
         self.final_layer = FinalLayer(config)
 
-    def _init_weights(self):
+        if not skip_init:
+            self.__init_weights()
+
+    def __init_weights(self):
         # Initialize final layer weights to zero
         init.zeros_(self.final_layer.linear.weight)
         init.zeros_(self.final_layer.linear.bias)

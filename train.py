@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import pytorch_lightning as pl
 import torch
+import wandb
 from datasets import load_dataset
 from diffusers import DDPMScheduler
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -14,28 +15,24 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-import wandb
-from dataset import PreprocessedCatDataset, PreprocessedDataset
+from dataset import PreprocessedDataset
 from dit import DiT, DiTConfig
-from vae import StableDiffusionVAE
 
 multiprocessing.set_start_method("spawn", force=True)
-
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
 @dataclass
 class TrainerConfig:
     batch_size: int = 32
-    lr: int = 1e-4
+    lr: float = 1e-4
 
 
 class DiTLightning(pl.LightningModule):
-    def __init__(self, dit_config, trainer_config: TrainerConfig, skip_init=False):
+    def __init__(self, dit_config, trainer_config: TrainerConfig):
         super().__init__()
         self.save_hyperparameters()
-        self.net = DiT(dit_config, skip_init=skip_init)
-        self.vae = StableDiffusionVAE()
+        self.net = DiT(dit_config)
         self.num_train_timesteps = 1000
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.num_train_timesteps,
@@ -47,18 +44,10 @@ class DiTLightning(pl.LightningModule):
     def forward(self, x, t, class_labels):
         return self.net(x, t, class_labels)
 
-    def setup(self, stage=None):
-        # Ensure VAE is on the correct device and in eval mode
-        self.vae.vae = self.vae.vae.to(self.device)
-        self.vae.vae.eval()
-        for param in self.vae.vae.parameters():
-            param.requires_grad = False
-
     def training_step(self, batch, batch_idx):
-        images, class_labels, _ = batch
+        img_tensor, latent_tensor, label, _ = batch
 
-        images = images.to(torch.bfloat16)
-        latents = self.vae.encode(images)
+        latents = latent_tensor.to(torch.bfloat16)
         noise = torch.randn_like(latents)
 
         timesteps = torch.randint(
@@ -66,9 +55,8 @@ class DiTLightning(pl.LightningModule):
         ).long()
 
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-        noise_pred = self.net(noisy_latents, timesteps, class_labels)
+        noise_pred = self.net(noisy_latents, timesteps, label)
 
-        # Compute loss
         loss = F.mse_loss(noise_pred, noise)
         if not torch.isfinite(loss):
             print(f"Non-finite loss detected: {loss}")
@@ -88,8 +76,7 @@ class DiTLightning(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
-        return optimizer
+        return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
 
 
 def clean_cuda_memory():
@@ -100,26 +87,6 @@ def clean_cuda_memory():
     torch.cuda.reset_peak_memory_stats()
 
 
-def load_model_from_checkpoint(checkpoint_path, device):
-    # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    # Extract the configuration from the checkpoint
-    dit_config = DiTConfig(**checkpoint["hyper_parameters"]["dit_config"])
-    trainer_config = TrainerConfig(**checkpoint["hyper_parameters"]["trainer_config"])
-
-    # Create a new model instance
-    model = DiTLightning(dit_config, trainer_config, skip_init=True)
-
-    # Load the state dict
-    model.load_state_dict(checkpoint["state_dict"])
-
-    # Move the model to the specified device
-    model = model.to(device)
-
-    return model
-
-
 if __name__ == "__main__":
     clean_cuda_memory()
     warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
@@ -127,25 +94,23 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Configure Wandb to log metrics but not save artifacts
     wandb.init(project="dit-cats", save_code=True, mode="online")
-    wandb_logger = WandbLogger(log_model=False)
-
-    vae = StableDiffusionVAE()
+    wandb_logger = WandbLogger(log_model=True)
 
     logging.info("Loading the dataset...")
     original_dataset = load_dataset("huggan/cats", split="train")
 
     logging.info("Creating PreprocessedDataset...")
-    preprocessed_dataset = PreprocessedCatDataset(
+    preprocessed_dataset = PreprocessedDataset(
         dataset=original_dataset,
         size=256,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
+        shard_dir="cat_dataset_shards",
+        num_shards=10,
     )
 
-    trainer_config = TrainerConfig(batch_size=32, lr=1e-4)
+    trainer_config = TrainerConfig(batch_size=64, lr=1e-4)
 
-    # DiT Configuration
     dit_config = DiTConfig(
         image_size=32,
         patch_size=2,
@@ -157,45 +122,32 @@ if __name__ == "__main__":
         num_classes=preprocessed_dataset.num_classes,
     )
 
-    # Initialize the model
     model = DiTLightning(dit_config, trainer_config)
 
-    # Load the weights from the checkpoint
-    checkpoint = torch.load(
-        "checkpoints_cat_reddit_fix/dit-epoch=161-step=12760-train_loss=0.23.ckpt",
-        map_location=device,
-    )
-    model.load_state_dict(checkpoint["state_dict"])
-
+    checkpoint_dir = "checkpoints_cat"
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat_reddit_fix_v2",
+        dirpath=checkpoint_dir,
         filename="dit-{epoch:02d}-{step}-{train_loss:.2f}",
         monitor="train_loss",
-        every_n_train_steps=40,
-        save_top_k=4,
-        save_on_train_epoch_end=False,
-    )
-
-    last_checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_cat_reddit_fix_v2",
-        filename="dit-last-{epoch:02d}-{step}-{train_loss:.2f}",
+        mode="min",
+        save_top_k=10,
+        save_on_train_epoch_end=True,
         save_last=True,
+        every_n_epochs=1,
     )
 
-    # Set up the trainer
     trainer = pl.Trainer(
-        max_epochs=200,
+        max_epochs=400,
         logger=wandb_logger,
         precision="bf16-mixed",
         log_every_n_steps=1,
-        accelerator="cuda",
-        devices="8",
-        strategy="ddp",
+        accelerator="auto",
+        devices="auto",
         gradient_clip_val=1.0,
-        callbacks=[checkpoint_callback, last_checkpoint_callback],
+        callbacks=[checkpoint_callback],
+        accumulate_grad_batches=4,
     )
 
-    # Create DataLoader
     train_dataloader = DataLoader(
         preprocessed_dataset,
         batch_size=trainer_config.batch_size,
@@ -204,5 +156,22 @@ if __name__ == "__main__":
         persistent_workers=True,
     )
 
-    trainer.fit(model, train_dataloader)
+    # Check for the latest checkpoint
+    latest_checkpoint = None
+    if os.path.exists(checkpoint_dir):
+        checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith(".ckpt")]
+        if checkpoints:
+            latest_checkpoint = os.path.join(checkpoint_dir, "last.ckpt")
+            if not os.path.exists(latest_checkpoint):
+                latest_checkpoint = os.path.join(
+                    checkpoint_dir, sorted(checkpoints)[-1]
+                )
+
+    if latest_checkpoint and os.path.isfile(latest_checkpoint):
+        print(f"Resuming training from checkpoint: {latest_checkpoint}")
+        trainer.fit(model, train_dataloader, ckpt_path=latest_checkpoint)
+    else:
+        print("Starting training from scratch")
+        trainer.fit(model, train_dataloader)
+
     wandb.finish()

@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 from train import DiTLightning
 from vae import StableDiffusionVAE
+from train import TrainerConfig
 
 
 def sample_dit(
@@ -188,27 +189,28 @@ def visualize_selected_sampling_processes(
 ):
     n_steps = len(all_pred_output_histories[0])
     n_samples = len(selected_indices)
-    steps_to_visualize = [0, n_steps // 4, n_steps // 2, 3 * n_steps // 4, n_steps - 1]
+    steps_to_visualize = [1, n_steps // 4, n_steps // 2, 3 * n_steps // 4, n_steps]
     n_visualized_steps = len(steps_to_visualize)
 
-    fig, axs = plt.subplots(n_visualized_steps, 2, figsize=(12, 4 * n_visualized_steps))
-    plt.subplots_adjust(hspace=0.5)
+    fig, axs = plt.subplots(n_visualized_steps, 2, figsize=(14, 3 * n_visualized_steps))
+    plt.subplots_adjust(hspace=0.1, wspace=0.1)
 
-    axs[0][0].set_title("Generated Images")
-    axs[0][1].set_title("Predicted Noise")
+    fig.suptitle(
+        "         Generated Images                                                             Predicted Noise",
+        fontsize=16,
+    )
 
     for idx, step in enumerate(steps_to_visualize):
-        # Collect images and noise predictions for all selected samples at this step
         images = []
         noise_preds = []
         for sample_idx in selected_indices:
             with torch.no_grad():
                 image = vae.decode(
-                    all_step_histories[sample_idx][step].to(vae.vae.device)
+                    all_step_histories[sample_idx][step - 1].to(vae.vae.device)
                 )
             images.append(image)
-            if step < n_steps - 1:  # There's no noise prediction for the last step
-                noise_preds.append(all_pred_output_histories[sample_idx][step])
+            if step < n_steps:
+                noise_preds.append(all_pred_output_histories[sample_idx][step - 1])
 
         # Plot generated images
         images = torch.cat(images)
@@ -223,7 +225,16 @@ def visualize_selected_sampling_processes(
             axs[idx][1].imshow(noise_grid.mean(dim=0).cpu(), cmap="viridis")
         axs[idx][1].axis("off")
 
-        axs[idx][0].set_ylabel(f"Step {n_steps - step}")
+        # Add step numbers on both sides
+        axs[idx][0].text(
+            -0.1,
+            0.5,
+            f"Step {step}",
+            transform=axs[idx][0].transAxes,
+            va="center",
+            ha="right",
+            fontsize=12,
+        )
 
     plt.tight_layout()
     plt.savefig(save_path)
@@ -238,9 +249,7 @@ if __name__ == "__main__":
     vae = StableDiffusionVAE().to(device)
 
     # Load the model from checkpoint
-    checkpoint_path = (
-        "checkpoints_cat_reddit_fix_v2/dit-epoch=94-step=7440-train_loss=0.22.ckpt"
-    )
+    checkpoint_path = "checkpoints_cat/last.ckpt"
     model = DiTLightning.load_from_checkpoint(checkpoint_path)
     model = model.to(device)
     print("Model loaded successfully")
@@ -269,7 +278,7 @@ if __name__ == "__main__":
     print("Sampling completed")
 
     # Select 4 images based on their numbers (e.g., 0, 5, 10, 15)
-    selected_indices = [0, 5, 10, 15]
+    selected_indices = [3, 5, 18, 19]
 
     # Visualize the sampling process for the selected images
 
@@ -281,7 +290,7 @@ if __name__ == "__main__":
         "selected_sampling_visualization.png",
     )
 
-    # print("Process completed")
+    print("Process completed")
 
     # print("Sampling...")
     # step_history, pred_output_history = sample_dit(
@@ -298,7 +307,8 @@ if __name__ == "__main__":
     # vae = StableDiffusionVAE().to(device)
 
     # # Specify the steps you want to visualize for the static image
-    # steps_to_visualize = [0, 400, 600, 800, 900, 999]
+    # # steps_to_visualize = [0, 400, 600, 800, 900, 999]
+    # steps_to_visualize = [0, 200, 400, 450, 499]
 
     # # Create the static visualization
     # visualize_sampling_process(
@@ -306,7 +316,7 @@ if __name__ == "__main__":
     #     step_history,
     #     pred_output_history,
     #     class_labels,
-    #     f"dit_cat_sampling_visualization_reddit_v.png",
+    #     f"dit_cat_sampling_visualization_reddit_v3.png",
     #     steps_to_visualize=steps_to_visualize,
     # )
 

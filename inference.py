@@ -1,15 +1,9 @@
-import os
-
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from torchvision.utils import make_grid, save_image
-import imageio
 from tqdm import tqdm
 
-
-from dit import DiT, DiTConfig
-from train import DiTLightning, TrainerConfig
+from train import DiTLightning
 from vae import StableDiffusionVAE
 
 

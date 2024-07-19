@@ -6,6 +6,7 @@ import warnings
 
 import pytorch_lightning as pl
 import torch
+import wandb
 from diffusers import DDPMScheduler
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
@@ -14,7 +15,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
-import wandb
 from dit import DiT, DiTConfig
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"

@@ -33,8 +33,8 @@ class MLPWithDepthwiseConv(nn.Module):
         self.depthwise_conv = nn.Conv2d(
             4 * config.n_embd,
             4 * config.n_embd,
-            kernel_size=3,
-            padding=1,
+            kernel_size=4,
+            padding="same",
             groups=4 * config.n_embd,
         )
 
